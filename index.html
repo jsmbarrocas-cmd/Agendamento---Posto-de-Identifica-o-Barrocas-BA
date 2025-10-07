@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Agenda - Posto de Identificação</title>
+  <style>
+    body { font-family: Arial, sans-serif; background:#f7f9fb; color:#222; margin:30px auto; max-width:760px; }
+    h1 { color:#0066cc; text-align:center; }
+    form { background:white; padding:20px; border-radius:10px; box-shadow: 0 2px 8px rgba(0,0,0,.06); }
+    label { display:block; margin-top:10px; font-weight:600; }
+    input, select, button { width:100%; padding:10px; margin-top:6px; border-radius:6px; border:1px solid #ccd; font-size:14px; }
+    button { background:#0066cc; color:white; font-weight:700; cursor:pointer; }
+    .mensagem { margin-top:12px; padding:10px; border-radius:6px; display:none; }
+    .sucesso { background:#e6ffed; color:#1b7a3a; }
+    .erro { background:#ffe6e6; color:#7a1b1b; }
+    .row { display:flex; gap:10px; }
+    .row > * { flex:1; }
+    .admin { margin-top:20px; font-size:14px; }
+    table { width:100%; border-collapse:collapse; margin-top:8px; }
+    th, td { padding:6px; border-bottom:1px solid #eee; text-align:left; font-size:13px; }
+  </style>
+</head>
+<body>
+  <h1>Agendamento - Posto de Identificação Barrocas-BA</h1>
+
+  <form id="form-agenda">
+    <label>Nome completo</label>
+    <input id="nome" required />
+
+    <div class="row">
+      <div>
+        <label>CPF</label>
+        <input id="cpf" required placeholder="Apenas números"/>
+      </div>
+      <div>
+        <label>Telefone</label>
+        <input id="telefone" required placeholder="DDD + número, apenas números"/>
+      </div>
+    </div>
+
+    <label>E-mail</label>
+    <input id="email" type="email" required placeholder="exemplo@dominio.com"/>
+
+    <label>Data</label>
+    <input id="data" type="date" required />
+
+    <label>Horário disponível</label>
+    <select id="hora"><option>Selecione a data primeiro</option></select>
+
+    <button type="submit">Agendar</button>
+  </form>
+
+  <div id="mensagem" class="mensagem"></div>
+
+  <div class="admin">
+    <h3>Painel administrativo (requer login)</h3>
+    <p>Para acessar as rotas administrativas use as credenciais definidas nas variáveis de ambiente <code>ADMIN_USER</code> e <code>ADMIN_PASS</code>.</p>
+    <button id="btn-carregar">Carregar agendamentos (requer admin)</button>
+    <div id="lista-agendamentos"></div>
+
+    <h4>Cadastrar horário (requer admin)</h4>
+    <div style="display:flex; gap:8px;">
+      <input id="novo-data" placeholder="YYYY-MM-DD" />
+      <input id="novo-hora" placeholder="HH:MM" />
+      <button id="btn-cadastrar">Cadastrar</button>
+    </div>
+
+    <h4>Listar horários (requer admin)</h4>
+    <button id="btn-listar-horarios">Listar horários (admin)</button>
+    <div id="lista-horarios"></div>
+  </div>
+
+<script>
+const form = document.getElementById('form-agenda');
+const dataInput = document.getElementById('data');
+const horaSelect = document.getElementById('hora');
+const mensagem = document.getElementById('mensagem');
+
+dataInput.addEventListener('change', async () => {
+  const data = dataInput.value;
+  horaSelect.innerHTML = '<option>Carregando...</option>';
+  try {
+    const res = await fetch(`/horarios-disponiveis?data=${data}`);
+    const rows = await res.json();
+    if (!rows || rows.length === 0) {
+      horaSelect.innerHTML = '<option>Nenhum horário disponível</option>';
+    } else {
+      horaSelect.innerHTML = rows.map(r => `<option value="${r.hora}">${r.hora}</option>`).join('');
+    }
+  } catch (e) {
+    horaSelect.innerHTML = '<option>Erro ao carregar</option>';
+  }
+});
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  mensagem.style.display = 'none';
+  const payload = {
+    nome: document.getElementById('nome').value.trim(),
+    cpf: document.getElementById('cpf').value.replace(/\D/g,''),
+    email: document.getElementById('email').value.trim(),
+    telefone: document.getElementById('telefone').value.replace(/\D/g,''),
+    data: document.getElementById('data').value,
+    hora: document.getElementById('hora').value
+  };
+
+  try {
+    const res = await fetch('/agendar', {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const body = await res.json();
+    if (!res.ok) throw body;
+    mensagem.className = 'mensagem sucesso';
+    mensagem.textContent = body.mensagem || 'Agendamento realizado com sucesso!';
+    mensagem.style.display = 'block';
+    dataInput.dispatchEvent(new Event('change'));
+  } catch (err) {
+    mensagem.className = 'mensagem erro';
+    mensagem.textContent = err && err.erro ? err.erro : 'Erro ao agendar.';
+    mensagem.style.display = 'block';
+  }
+});
+
+// Admin actions - these will prompt a browser Basic Auth dialog
+document.getElementById('btn-carregar').addEventListener('click', async () => {
+  const target = document.getElementById('lista-agendamentos');
+  target.innerHTML = 'Carregando... (será solicitada autenticação)';
+  try {
+    const res = await fetch('/todos-agendamentos');
+    if (!res.ok) throw await res.json();
+    const rows = await res.json();
+    if (!rows || rows.length === 0) { target.innerHTML = '<i>Nenhum agendamento</i>'; return; }
+    const html = ['<table><thead><tr><th>Nome</th><th>CPF</th><th>E-mail</th><th>Telefone</th><th>Data</th><th>Hora</th></tr></thead><tbody>'];
+    for (const r of rows) html.push(`<tr><td>${r.nome}</td><td>${r.cpf}</td><td>${r.email}</td><td>${r.telefone}</td><td>${r.data}</td><td>${r.hora}</td></tr>`);
+    html.push('</tbody></table>');
+    target.innerHTML = html.join('');
+  } catch (e) {
+    target.innerHTML = '<span style="color:#a00">Erro ao carregar (verifique autenticação).</span>';
+  }
+});
+
+document.getElementById('btn-cadastrar').addEventListener('click', async () => {
+  const d = document.getElementById('novo-data').value;
+  const h = document.getElementById('novo-hora').value;
+  if (!d || !h) return alert('Preencha data e hora.');
+  try {
+    const res = await fetch('/admin/horarios', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ data: d, hora: h })
+    });
+    if (!res.ok) throw await res.json();
+    alert('Horário cadastrado.');
+  } catch (e) {
+    alert('Erro ao cadastrar horário (verifique autenticação).');
+  }
+});
+
+document.getElementById('btn-listar-horarios').addEventListener('click', async () => {
+  const target = document.getElementById('lista-horarios');
+  target.innerHTML = 'Carregando... (requer autenticação)';
+  try {
+    const res = await fetch('/admin/horarios');
+    if (!res.ok) throw await res.json();
+    const rows = await res.json();
+    if (!rows || rows.length === 0) { target.innerHTML = '<i>Nenhum horário</i>'; return; }
+    const html = ['<table><thead><tr><th>ID</th><th>Data</th><th>Hora</th><th>Disponível</th></tr></thead><tbody>'];
+    for (const r of rows) html.push(`<tr><td>${r.id}</td><td>${r.data}</td><td>${r.hora}</td><td>${r.disponivel}</td></tr>`);
+    html.push('</tbody></table>');
+    target.innerHTML = html.join('');
+  } catch (e) {
+    target.innerHTML = '<span style="color:#a00">Erro ao listar (verifique autenticação).</span>';
+  }
+});
+</script>
+</body>
+</html>

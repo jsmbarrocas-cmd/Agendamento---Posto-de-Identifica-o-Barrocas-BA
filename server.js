@@ -68,6 +68,10 @@ app.post('/agendar', (req, res) => {
   });
 });
 
+app.get('/', (req, res) => {
+  res.send('Agenda - Posto de Identificação - Barrocas-BA está online!');
+});
+
 app.listen(3000, () => {
   console.log('Servidor rodando em http://localhost:3000');
 });

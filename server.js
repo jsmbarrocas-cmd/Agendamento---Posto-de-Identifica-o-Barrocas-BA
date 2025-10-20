@@ -1,332 +1,203 @@
-const express = require("express");
-const bodyParser = require("body-parser");
-const sqlite3 = require("sqlite3").verbose();
-const PDFDocument = require("pdfkit");
-const fs = require("fs");
-const path = require("path");
-const cors = require("cors");
-const session = require("express-session");
+const express = require('express');
+const bodyParser = require('body-parser');
+const session = require('express-session');
+const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
+const fs = require('fs');
+const PDFDocument = require('pdfkit');
 
 const app = express();
-const db = new sqlite3.Database("./agenda.db");
+const PORT = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(bodyParser.json());
-app.use(express.static(path.join(__dirname, "public")));
+// ====== CONFIGURAÇÃO DO BANCO DE DADOS PERSISTENTE ======
+const dbDir = '/var/data';
+const dbPath = path.join(dbDir, 'agenda.db');
 
-app.use(
-  session({
-    secret: "agenda-c326-secret",
-    resave: false,
-    saveUninitialized: false,
-  })
-);
+// Cria o diretório /var/data se não existir (Render mantém esse caminho)
+if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
 
-// ===============================
-// BANCO DE DADOS
-// ===============================
+// Conecta ao banco
+const db = new sqlite3.Database(dbPath);
+
+// ====== CRIA AS TABELAS SE NÃO EXISTIREM ======
 db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS agendamentos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome TEXT,
-        cpf TEXT,
-        email TEXT,
-        telefone TEXT,
-        data TEXT,
-        hora TEXT
-    )`);
+  db.run(`CREATE TABLE IF NOT EXISTS admin (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    usuario TEXT,
+    senha TEXT
+  )`);
 
   db.run(`CREATE TABLE IF NOT EXISTS horarios (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        data TEXT,
-        hora TEXT,
-        disponivel INTEGER DEFAULT 1
-    )`);
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    data TEXT,
+    hora TEXT,
+    disponivel INTEGER
+  )`);
 
-  db.run(`CREATE TABLE IF NOT EXISTS admin (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        usuario TEXT UNIQUE,
-        senha TEXT
-    )`);
+  db.run(`CREATE TABLE IF NOT EXISTS agendamentos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome TEXT,
+    cpf TEXT,
+    email TEXT,
+    telefone TEXT,
+    data TEXT,
+    hora TEXT
+  )`);
 
-  db.get("SELECT * FROM admin WHERE usuario = ?", ["admin"], (err, row) => {
+  // Garante que o admin existe
+  db.get("SELECT * FROM admin WHERE usuario = 'admin'", (err, row) => {
     if (!row) {
-      db.run("INSERT INTO admin (usuario, senha) VALUES (?, ?)", [
-        "admin",
-        "009975",
-      ]);
-      console.log("✅ Usuário admin criado (admin / 009975)");
+      db.run("INSERT INTO admin (usuario, senha) VALUES (?, ?)", ["admin", "009975"]);
+      console.log("✅ Admin criado com senha padrão 009975");
     }
   });
 });
 
-// ===============================
-// FUNÇÃO PARA GERAR HORÁRIOS PADRÃO
-// ===============================
-function gerarHorariosPadrao(data) {
-  const horarios = [
-    "08:00", "08:30", "09:00", "09:30",
-    "10:00", "10:30", "11:00", "11:30",
-    "14:00", "14:30", "15:00", "15:30"
-  ];
+app.use(bodyParser.json());
+app.use(express.static(path.join(__dirname, 'public')));
 
-  horarios.forEach((hora) => {
-    db.run(
-      "INSERT INTO horarios (data, hora, disponivel) VALUES (?, ?, 1)",
-      [data, hora],
-      (err) => {
-        if (err) console.error("Erro ao inserir horário:", err.message);
-      }
-    );
-  });
+// ====== CONFIGURAÇÃO DE SESSÃO ======
+app.use(session({
+  secret: 'agenda_secret_key',
+  resave: false,
+  saveUninitialized: false
+}));
+
+// ====== MIDDLEWARE DE AUTENTICAÇÃO ======
+function checkAuth(req, res, next) {
+  if (req.session && req.session.loggedIn) next();
+  else res.status(401).json({ success: false, message: 'Não autorizado' });
 }
 
-// ===============================
-// LOGIN / LOGOUT
-// ===============================
-app.post("/api/login", (req, res) => {
+// ====== LOGIN / LOGOUT ======
+app.post('/api/login', (req, res) => {
   const { usuario, senha } = req.body;
-  db.get(
-    "SELECT * FROM admin WHERE usuario = ? AND senha = ?",
-    [usuario, senha],
-    (err, row) => {
-      if (err) return res.status(500).json({ success: false });
-      if (row) {
-        req.session.logado = true;
-        res.json({ success: true });
-      } else {
-        res.json({ success: false });
-      }
+  db.get("SELECT * FROM admin WHERE usuario = ? AND senha = ?", [usuario, senha], (err, row) => {
+    if (row) {
+      req.session.loggedIn = true;
+      res.json({ success: true });
+    } else {
+      res.json({ success: false });
     }
-  );
+  });
 });
 
-app.post("/api/logout", (req, res) => {
+app.post('/api/logout', (req, res) => {
   req.session.destroy(() => res.json({ success: true }));
 });
 
-// ===============================
-// MIDDLEWARE DE AUTENTICAÇÃO
-// ===============================
-function autenticar(req, res, next) {
-  if (req.session.logado) return next();
-  res.status(401).json({ success: false, message: "Não autorizado" });
-}
+// ====== ROTAS ADMIN PROTEGIDAS ======
 
-// ===============================
-// ROTAS ADMINISTRATIVAS
-// ===============================
-app.post("/admin/api/cadastrar-horarios", autenticar, (req, res) => {
+// Cadastrar horários automáticos
+app.post('/admin/api/cadastrar-horarios', checkAuth, (req, res) => {
   const { data } = req.body;
-  if (!data) return res.json({ success: false, message: "Data inválida" });
+  if (!data) return res.json({ erro: 'Data inválida' });
 
-  db.all("SELECT * FROM horarios WHERE data = ?", [data], (err, rows) => {
-    if (rows.length > 0) {
-      return res.json({ success: false, message: "Horários já cadastrados!" });
-    } else {
-      gerarHorariosPadrao(data);
-      res.json({ success: true, message: "Horários gerados com sucesso!" });
-    }
+  const horarios = ['08:00','08:30','09:00','09:30','10:00','10:30','11:00','11:30','14:00','14:30','15:00','15:30'];
+  const stmt = db.prepare("INSERT INTO horarios (data, hora, disponivel) VALUES (?, ?, 1)");
+  horarios.forEach(h => stmt.run(data, h));
+  stmt.finalize(() => res.json({ success: true, message: 'Horários cadastrados!' }));
+});
+
+// Listar horários
+app.get('/admin/api/horarios', checkAuth, (req, res) => {
+  db.all("SELECT * FROM horarios ORDER BY data ASC, hora ASC", (err, rows) => {
+    if (err) return res.json({ success: false, message: err.message });
+    res.json({ success: true, rows });
   });
 });
 
-// ✅ CORRIGIDO — EXCLUIR TODOS HORÁRIOS DE UMA DATA
-app.delete("/admin/api/horarios/:data", autenticar, (req, res) => {
-  const { data } = req.params;
+// Excluir horários
+app.delete('/admin/api/excluir-horarios', checkAuth, (req, res) => {
+  const { data } = req.body;
+  if (!data) return res.json({ success: false, message: 'Data inválida' });
 
-  db.run("DELETE FROM horarios WHERE data = ?", [data], function (err) {
-    if (err) {
-      return res.json({ success: false, message: "Erro ao excluir horários." });
-    }
-
-    if (this.changes > 0) {
-      return res.json({ success: true, message: "Todos os horários foram excluídos!" });
-    } else {
-      return res.json({ success: false, message: "Nenhum horário encontrado para esta data." });
-    }
+  db.run("DELETE FROM horarios WHERE data = ?", [data], err => {
+    if (err) return res.json({ success: false, message: err.message });
+    res.json({ success: true, message: `Horários de ${data} excluídos.` });
   });
 });
 
-// ✅ EXCLUIR AGENDAMENTO INDIVIDUAL
-app.delete("/admin/api/agendamentos/:id", autenticar, (req, res) => {
-  const { id } = req.params;
-
-  db.get("SELECT * FROM agendamentos WHERE id = ?", [id], (err, row) => {
-    if (!row) return res.json({ success: false, message: "Agendamento não encontrado." });
-
-    db.run("DELETE FROM agendamentos WHERE id = ?", [id], function (err2) {
-      if (err2) return res.json({ success: false, message: "Erro ao excluir agendamento." });
-
-      db.run(
-        "UPDATE horarios SET disponivel = 1 WHERE data = ? AND hora = ?",
-        [row.data, row.hora]
-      );
-
-      res.json({ success: true, message: "Agendamento excluído com sucesso!" });
-    });
-  });
-});
-
-// ===============================
-// CONSULTAR LISTAS
-// ===============================
-app.get("/admin/api/agendamentos", autenticar, (req, res) => {
+// Filtrar agendamentos
+app.get('/admin/api/agendamentos', checkAuth, (req, res) => {
   const { inicio, fim } = req.query;
-  let query = "SELECT * FROM agendamentos";
-  const params = [];
-
-  if (inicio && fim) {
-    query += " WHERE date(data) BETWEEN date(?) AND date(?)";
-    params.push(inicio, fim);
-  }
-
-  db.all(query, params, (err, rows) => {
+  db.all("SELECT * FROM agendamentos WHERE data BETWEEN ? AND ? ORDER BY data, hora", [inicio, fim], (err, rows) => {
     if (err) return res.json({ success: false, message: err.message });
     res.json({ success: true, rows });
   });
 });
 
-app.get("/admin/api/horarios", autenticar, (req, res) => {
-  db.all("SELECT * FROM horarios ORDER BY data, hora", [], (err, rows) => {
-    if (err) return res.json({ success: false, message: err.message });
-    res.json({ success: true, rows });
+// Gerar PDF dos agendamentos filtrados
+app.get('/admin/api/relatorio', checkAuth, (req, res) => {
+  const { inicio, fim } = req.query;
+  db.all("SELECT * FROM agendamentos WHERE data BETWEEN ? AND ? ORDER BY data, hora", [inicio, fim], (err, rows) => {
+    if (err) return res.status(500).send('Erro ao gerar relatório.');
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="relatorio_agendamentos.pdf"');
+
+    const doc = new PDFDocument();
+    doc.pipe(res);
+    doc.fontSize(16).text('Relatório de Agendamentos', { align: 'center' });
+    doc.moveDown();
+
+    rows.forEach(r => {
+      doc.fontSize(12).text(`Nome: ${r.nome}`);
+      doc.text(`CPF: ${r.cpf}`);
+      doc.text(`Data: ${r.data.split('-').reverse().join('/')}`);
+      doc.text(`Hora: ${r.hora}`);
+      doc.moveDown();
+    });
+
+    doc.end();
   });
 });
 
-// ===============================
-// ROTAS PÚBLICAS
-// ===============================
-app.get("/api/datas-disponiveis", (req, res) => {
-  db.all(
-    "SELECT DISTINCT data FROM horarios WHERE disponivel = 1 ORDER BY data ASC",
-    (err, rows) => {
-      if (err) return res.status(500).json([]);
-      const datas = rows.map((r) => r.data);
-      res.json(datas);
-    }
-  );
+// ====== ROTAS PÚBLICAS ======
+
+// Retorna datas disponíveis
+app.get('/api/datas-disponiveis', (req, res) => {
+  db.all("SELECT DISTINCT data FROM horarios WHERE disponivel = 1 ORDER BY data", (err, rows) => {
+    if (err) return res.json({ success: false, error: err.message });
+    const datas = rows.map(r => r.data);
+    res.json({ success: true, datas });
+  });
 });
 
-app.get("/api/horarios-disponiveis", (req, res) => {
+// Retorna horários disponíveis
+app.get('/api/horarios', (req, res) => {
   const { data } = req.query;
-  db.all(
-    "SELECT hora FROM horarios WHERE data = ? AND disponivel = 1 ORDER BY hora ASC",
-    [data],
-    (err, rows) => {
-      if (err) return res.status(500).json([]);
-      res.json(rows);
-    }
-  );
+  db.all("SELECT hora FROM horarios WHERE data = ? AND disponivel = 1 ORDER BY hora ASC", [data], (err, rows) => {
+    if (err) return res.json({ success: false, message: err.message });
+    res.json({ success: true, horarios: rows.map(r => r.hora) });
+  });
 });
 
-// ===============================
-// AGENDAR NOVO HORÁRIO
-// ===============================
-app.post("/api/agendar", (req, res) => {
+// Agendar
+app.post('/api/agendar', (req, res) => {
   const { nome, cpf, email, telefone, data, hora } = req.body;
+  if (!nome || !cpf || !data || !hora) return res.json({ success: false, message: 'Campos obrigatórios faltando.' });
 
-  // Bloqueia novo agendamento se existir algum agendamento futuro para o mesmo CPF
-  db.get(
-    "SELECT * FROM agendamentos WHERE cpf = ? AND date(data) >= date('now')",
-    [cpf],
-    (err, row) => {
-      if (row) {
-        return res.json({
-          success: false,
-          message: "Você já possui um agendamento futuro. Só é permitido um de cada vez.",
-        });
-      }
+  db.get("SELECT * FROM agendamentos WHERE cpf = ? AND data >= DATE('now')", [cpf], (err, row) => {
+    if (row) return res.json({ success: false, message: 'Já existe um agendamento ativo para este CPF.' });
 
-      db.get(
-        "SELECT * FROM horarios WHERE data = ? AND hora = ? AND disponivel = 1",
-        [data, hora],
-        (err, row) => {
-          if (!row) {
-            return res.json({
-              success: false,
-              message: "Horário indisponível!",
-            });
-          }
+    db.run("INSERT INTO agendamentos (nome, cpf, email, telefone, data, hora) VALUES (?, ?, ?, ?, ?, ?)",
+      [nome, cpf, email, telefone, data, hora],
+      function (err) {
+        if (err) return res.json({ success: false, message: err.message });
 
-          db.run(
-            "INSERT INTO agendamentos (nome, cpf, email, telefone, data, hora) VALUES (?, ?, ?, ?, ?, ?)",
-            [nome, cpf, email, telefone, data, hora],
-            function (err) {
-              if (err)
-                return res.json({
-                  success: false,
-                  message: "Erro ao agendar.",
-                });
-
-              db.run(
-                "UPDATE horarios SET disponivel = 0 WHERE data = ? AND hora = ?",
-                [data, hora]
-              );
-
-              const doc = new PDFDocument();
-              const pdfPath = path.join(
-                __dirname,
-                "public",
-                `comprovante_${this.lastID}.pdf`
-              );
-              const stream = fs.createWriteStream(pdfPath);
-              doc.pipe(stream);
-
-              const dataFormatada = new Date(data + "T00:00:00-03:00").toLocaleDateString("pt-BR");
-
-              doc.fontSize(20).text("Comprovante de Agendamento", { align: "center" });
-              doc.moveDown();
-              doc.fontSize(14).text(`Nome: ${nome}`);
-              doc.text(`CPF: ${cpf}`);
-              doc.text(`E-mail: ${email}`);
-              doc.text(`Telefone: ${telefone}`);
-              doc.text(`Data: ${dataFormatada}`);
-              doc.text(`Horário: ${hora}`);
-              doc.end();
-
-              stream.on("finish", () => {
-                res.json({
-                  success: true,
-                  message: "Agendamento realizado com sucesso!",
-                  comprovante: `/comprovante_${this.lastID}.pdf`,
-                });
-              });
-            }
-          );
-        }
-      );
-    }
-  );
+        db.run("UPDATE horarios SET disponivel = 0 WHERE data = ? AND hora = ?", [data, hora]);
+        res.json({ success: true, message: 'Agendamento realizado com sucesso!' });
+      });
+  });
 });
 
-// ===============================
-// ADMIN PAGE
-// ===============================
-app.get("/admin", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "admin.html"));
-});
-
-// ===============================
-// REMOÇÃO AUTOMÁTICA DE AGENDAMENTOS APÓS 30 DIAS DA DATA
+// ====== LIMPEZA AUTOMÁTICA (30 DIAS APÓS DATA) ======
 setInterval(() => {
-  const hoje = new Date();
-  const trintaDiasAtras = new Date(hoje.setDate(hoje.getDate() - 30))
-    .toISOString()
-    .split("T")[0]; // formato YYYY-MM-DD
+  db.run("DELETE FROM agendamentos WHERE julianday('now') - julianday(data) > 30");
+}, 24 * 60 * 60 * 1000);
 
-  db.run(
-    "DELETE FROM agendamentos WHERE date(data) <= ?",
-    [trintaDiasAtras],
-    function (err) {
-      if (err) console.error("Erro ao remover agendamentos antigos:", err.message);
-      else if (this.changes > 0)
-        console.log(`🗑️ ${this.changes} agendamento(s) antigos removidos automaticamente.`);
-    }
-  );
-}, 24 * 60 * 60 * 1000); // roda a cada 24 horas
-
-// ===============================
-const PORT = 3000;
-app.listen(PORT, () =>
-  console.log(`🚀 Servidor rodando em http://localhost:${PORT}`)
-);
+// ====== INICIAR SERVIDOR ======
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor rodando em http://localhost:${PORT}`);
+});
